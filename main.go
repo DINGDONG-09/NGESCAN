@@ -113,20 +113,16 @@ func main() {
 	}
 
 	// ===== Emit output =====
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false) // biar & tidak jadi \u0026
+
 	if *pretty {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetEscapeHTML(false) // biar & tidak jadi \u0026
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(out); err != nil {
-			fmt.Fprintln(os.Stderr, "failed to emit findings:", err)
-			os.Exit(1)
-		}
-	} else {
-		// NDJSON emitter (pastikan helper kamu memanggil enc.SetEscapeHTML(false) juga)
-		if err := emitFindings(out); err != nil {
-			fmt.Fprintln(os.Stderr, "failed to emit findings:", err)
-			os.Exit(1)
-		}
+	}
+
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to emit findings:", err)
+		os.Exit(1)
 	}
 }
 

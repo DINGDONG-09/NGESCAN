@@ -25,10 +25,6 @@ type Finding struct {
 
 func emitFindings(findings []Finding) error {
 	enc := json.NewEncoder(os.Stdout)
-	for _, f := range findings {
-		if err := enc.Encode(f); err != nil {
-			return err
-		}
-	}
-	return nil
+	enc.SetEscapeHTML(false)
+	return enc.Encode(findings)
 }
