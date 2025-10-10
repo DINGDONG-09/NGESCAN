@@ -372,8 +372,47 @@ func runCheckPathWritable() Finding {
 	severity := SevInfo
 	desc := "No writeable directories in PATH found"
 	if writableCount > 0 {
-		severity = SevHigh
-		desc = "Writeable directories in PATH found: " + strconv.Itoa(writableCount)
+		// Categorize writable directories by risk level
+		systemRisk := 0  // System-critical directories
+		programRisk := 0 // Program directories
+		userRisk := 0    // User directories
+
+		for _, result := range results {
+			if result.Writable {
+				dirPath := strings.ToLower(result.Path)
+
+				// Classify by location type
+				if strings.Contains(dirPath, "\\windows\\") ||
+					strings.Contains(dirPath, "\\system32\\") ||
+					strings.Contains(dirPath, "\\syswow64\\") {
+					// System directories - CRITICAL risk
+					systemRisk++
+				} else if strings.Contains(dirPath, "\\program files\\") ||
+					strings.Contains(dirPath, "\\program files (x86)\\") {
+					// Program directories - HIGH risk
+					programRisk++
+				} else if strings.Contains(dirPath, "\\users\\") ||
+					strings.Contains(dirPath, "\\appdata\\") {
+					// User directories - MEDIUM risk (expected writability)
+					userRisk++
+				} else {
+					// Other locations - HIGH risk (unusual)
+					programRisk++
+				}
+			}
+		}
+
+		// Set severity based on risk classification
+		if systemRisk > 0 {
+			severity = SevCrit
+			desc = "CRITICAL: System directories in PATH are writable (" + strconv.Itoa(systemRisk) + " system, " + strconv.Itoa(programRisk) + " program, " + strconv.Itoa(userRisk) + " user)"
+		} else if programRisk > 0 {
+			severity = SevHigh
+			desc = "Program directories in PATH are writable (" + strconv.Itoa(programRisk) + " program, " + strconv.Itoa(userRisk) + " user)"
+		} else {
+			severity = SevLow
+			desc = "User directories in PATH are writable (" + strconv.Itoa(userRisk) + " user directories)"
+		}
 	}
 
 	data := map[string]any{

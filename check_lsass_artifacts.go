@@ -257,11 +257,19 @@ func checkSAMRegistry() SAMInfo {
 		info.Hints = append(info.Hints, "SAM registry key access denied - normal for non-SYSTEM")
 	}
 
-	// Check for SAM backup files
+	// Check for SAM backup files - use dynamic Windows directory
+	winDir := os.Getenv("WINDIR")
+	if winDir == "" {
+		winDir = os.Getenv("SystemRoot")
+		if winDir == "" {
+			winDir = `C:\Windows` // fallback only
+		}
+	}
+
 	samBackupPaths := []string{
-		`C:\Windows\Repair\SAM`,
-		`C:\Windows\System32\config\RegBack\SAM`,
-		`C:\Windows\System32\config\SAM.LOG`,
+		filepath.Join(winDir, "Repair", "SAM"),
+		filepath.Join(winDir, "System32", "config", "RegBack", "SAM"),
+		filepath.Join(winDir, "System32", "config", "SAM.LOG"),
 	}
 
 	for _, path := range samBackupPaths {
@@ -331,11 +339,30 @@ func checkSuspiciousFiles() []SuspiciousFile {
 	var files []SuspiciousFile
 
 	// Known locations where credential dumping tools or dumps might be found
+	windir := os.Getenv("WINDIR")
+	if windir == "" {
+		windir = os.Getenv("SystemRoot")
+		if windir == "" {
+			windir = "C:\\Windows" // fallback
+		}
+	}
+
+	programData := os.Getenv("PROGRAMDATA")
+	if programData == "" {
+		programData = "C:\\ProgramData" // fallback
+	}
+
+	userProfile := os.Getenv("USERPROFILE")
+	publicPath := `C:\Users\Public` // fallback
+	if userProfile != "" {
+		publicPath = filepath.Join(filepath.Dir(userProfile), "Public")
+	}
+
 	searchPaths := []string{
-		`C:\Windows\Temp`,
+		filepath.Join(windir, "Temp"),
 		`C:\Temp`,
-		`C:\Users\Public`,
-		`C:\ProgramData`,
+		publicPath,
+		programData,
 	}
 
 	// Suspicious filenames/patterns

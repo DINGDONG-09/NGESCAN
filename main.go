@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec" // jalankan ulang exe sendiri dengan argumen user
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ func main() {
 	pretty := flag.Bool("pretty", false, "Pretty-print JSON output")
 	timeout := flag.Int("timeout", 45, "Global timeout in seconds")
 	checksFlag := flag.String("checks", "", "Comma-separated check IDs to run (e.g. W-001,W-003). Empty = all.")
+	outputFile := flag.String("output", "", "Output results to JSON file (e.g. -output results.json)")
 	flag.Parse()
 
 	// Jika user minta shell lewat flag
@@ -112,8 +114,42 @@ func main() {
 		out = append(out, f)
 	}
 
+	// ===== Sort results by CheckID =====
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CheckID < out[j].CheckID
+	})
+
 	// ===== Emit output =====
-	enc := json.NewEncoder(os.Stdout)
+	var outputWriter *os.File
+	var shouldCloseFile bool
+
+	// Determine output destination
+	if *outputFile != "" {
+		// Write to file
+		file, err := os.Create(*outputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to create output file '%s': %v\n", *outputFile, err)
+			os.Exit(1)
+		}
+		outputWriter = file
+		shouldCloseFile = true
+		fmt.Fprintf(os.Stderr, "Writing results to file: %s\n", *outputFile)
+	} else {
+		// Write to stdout
+		outputWriter = os.Stdout
+		shouldCloseFile = false
+	}
+
+	// Ensure file is closed if we opened it
+	if shouldCloseFile {
+		defer func() {
+			if err := outputWriter.Close(); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to close output file: %v\n", err)
+			}
+		}()
+	}
+
+	enc := json.NewEncoder(outputWriter)
 	enc.SetEscapeHTML(false) // biar & tidak jadi \u0026
 
 	if *pretty {
@@ -123,6 +159,11 @@ func main() {
 	if err := enc.Encode(out); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to emit findings:", err)
 		os.Exit(1)
+	}
+
+	// Print completion message if writing to file
+	if *outputFile != "" {
+		fmt.Fprintf(os.Stderr, "Results successfully written to: %s\n", *outputFile)
 	}
 }
 
@@ -140,6 +181,8 @@ func startInteractiveShell() {
 	fmt.Println("Type commands below (same as CLI flags). Examples:")
 	fmt.Println("  -checks W-016 -pretty")
 	fmt.Println("  -checks W-015,W-017")
+	fmt.Println("  -output scan_results.json")
+	fmt.Println("  -checks W-001,W-020 -pretty -output full_scan.json")
 	fmt.Println("Built-ins: help, exit, quit")
 	fmt.Println()
 
@@ -216,7 +259,14 @@ func printHelp() {
 	fmt.Println("  -checks W-001,W-015 -pretty")
 	fmt.Println("  -checks W-016")
 	fmt.Println("  -pretty")
+	fmt.Println("  -output results.json")
+	fmt.Println("  -checks W-001,W-020 -pretty -output scan_results.json")
 	fmt.Println("Built-ins: help, exit, quit")
+	fmt.Println("")
+	fmt.Println("Output options:")
+	fmt.Println("  -output [filename.json]  Save results to JSON file (sorted W-001 to W-020)")
+	fmt.Println("  -pretty                  Format JSON with indentation")
+	fmt.Println("  (no flags)               Display compact JSON to terminal")
 }
 
 // splitCommandLine memecah input menjadi argumen (mendukung kutip "…").

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -275,9 +276,37 @@ func runCheckServiceHijack() Finding {
 
 	sev := SevInfo
 	desc := "No hijackable services/drivers found"
+	criticalCount := 0
+
 	if high {
-		sev = SevHigh
-		desc = "Potentially hijackable services/drivers detected"
+		// Count non-system services that are actually hijackable
+		for _, anyEntry := range data {
+			if toBool(anyEntry["binary_dir_writable"]) || toBool(anyEntry["can_change_config"]) ||
+				toBool(anyEntry["can_write_dac"]) || toBool(anyEntry["unquoted_path"]) {
+
+				name := strings.ToLower(fmt.Sprintf("%v", anyEntry["service"]))
+				imagePath := strings.ToLower(fmt.Sprintf("%v", anyEntry["image_path"]))
+
+				// Skip system services
+				isSystemService := strings.Contains(imagePath, "\\windows\\system32\\") ||
+					strings.Contains(imagePath, "\\windows\\syswow64\\") ||
+					strings.Contains(name, "windows") ||
+					strings.Contains(name, "microsoft") ||
+					strings.Contains(name, "system")
+
+				if !isSystemService {
+					criticalCount++
+				}
+			}
+		}
+
+		if criticalCount > 0 {
+			sev = SevHigh
+			desc = fmt.Sprintf("Potentially hijackable services/drivers detected (%d critical)", criticalCount)
+		} else {
+			sev = SevMed
+			desc = "Potentially hijackable system services detected (lower risk)"
+		}
 	}
 
 	return Finding{

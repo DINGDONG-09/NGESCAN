@@ -65,10 +65,25 @@ func runCheckUnquotedServicePaths() Finding {
 func summarizeUnquotedResults(bad []map[string]string) Finding {
 	sev := SevInfo                            // default: tidak ada temuan
 	desc := "No unquoted service paths found" // deskripsi default
-	if len(bad) > 0 {                         // ada temuan
-		sev = SevHigh
-		desc = "Found unquoted service paths: " + strconv.Itoa(len(bad))
+
+	if len(bad) > 0 { // ada temuan
+		// Check if any of the unquoted paths are actually exploitable
+		exploitableCount := 0
+		for _, item := range bad {
+			if item["exploitable"] == "true" {
+				exploitableCount++
+			}
+		}
+
+		if exploitableCount > 0 {
+			sev = SevHigh
+			desc = "Found unquoted service paths: " + strconv.Itoa(len(bad)) + " (exploitable: " + strconv.Itoa(exploitableCount) + ")"
+		} else {
+			sev = SevLow
+			desc = "Found unquoted service paths: " + strconv.Itoa(len(bad)) + " (not exploitable - no writable segments)"
+		}
 	}
+
 	return Finding{
 		CheckID:     "W-002",
 		Title:       "Unquoted service executable paths",

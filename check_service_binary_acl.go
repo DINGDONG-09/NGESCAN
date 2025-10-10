@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -106,8 +107,30 @@ func runCheckServiceBinaryACL() Finding {
 	sev := SevInfo
 	desc := "No writable service binaries or directories detected."
 	if len(data.Writable) > 0 {
-		sev = SevHigh
-		desc = "Writable service binary paths found."
+		// Check if any writable services are actually exploitable (non-system services)
+		criticalCount := 0
+		for _, entry := range data.Writable {
+			serviceName := strings.ToLower(entry.Service)
+			binaryPath := strings.ToLower(entry.Path)
+
+			// Skip Windows system services that are less likely to be exploitable
+			isSystemService := strings.Contains(binaryPath, "\\windows\\system32\\") ||
+				strings.Contains(binaryPath, "\\windows\\syswow64\\") ||
+				strings.Contains(serviceName, "windows") ||
+				strings.Contains(serviceName, "microsoft")
+
+			if !isSystemService {
+				criticalCount++
+			}
+		}
+
+		if criticalCount > 0 {
+			sev = SevHigh
+			desc = fmt.Sprintf("Writable service binary paths found (%d critical, %d total).", criticalCount, len(data.Writable))
+		} else {
+			sev = SevMed
+			desc = fmt.Sprintf("Writable service binary paths found (%d system services).", len(data.Writable))
+		}
 	}
 
 	return Finding{

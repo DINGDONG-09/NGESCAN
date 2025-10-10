@@ -111,18 +111,51 @@ func runCheckAutoruns() Finding {
 		}()
 	}
 
-	// tentukan severity:
-	// - default info; kalau ada entri unquoted ATAU exploitable, naikkan ke medium
+	// tentukan severity berdasarkan analisis yang lebih cerdas:
+	// - default info; hanya naikkan jika ada entri benar-benar mencurigakan
 	sev := SevInfo
+	suspiciousCount := 0
+	exploitableCount := 0
+
 	for _, it := range all {
-		if it["unquoted"] == "true" || it["exploitable"] == "true" {
-			sev = SevMed
-			break
+		exePath := strings.ToLower(it["exe_path"])
+
+		// Skip legitimate locations (system and user applications) - handle both slash types
+		exePath = strings.ToLower(strings.ReplaceAll(exePath, "/", "\\"))
+		isLegitimate := strings.Contains(exePath, "\\program files\\") ||
+			strings.Contains(exePath, "\\program files (x86)\\") ||
+			strings.Contains(exePath, "\\windows\\system32\\") ||
+			strings.Contains(exePath, "\\windows\\syswow64\\") ||
+			(strings.Contains(exePath, "\\users\\") &&
+				(strings.Contains(exePath, "\\appdata\\local\\") ||
+					strings.Contains(exePath, "\\appdata\\roaming\\")))
+
+		if it["exploitable"] == "true" {
+			if !isLegitimate {
+				// Non-standard location that's exploitable = suspicious
+				suspiciousCount++
+			} else {
+				// Standard/user location but exploitable = just count
+				exploitableCount++
+			}
 		}
+
+		if it["unquoted"] == "true" && !isLegitimate {
+			// Unquoted path in non-standard location = suspicious
+			suspiciousCount++
+		}
+	}
+
+	// Set severity based on suspicious findings only
+	if suspiciousCount > 0 {
+		sev = SevMed
 	}
 
 	// deskripsi ringkas jumlah entri yang ditemukan
 	desc := "Autoruns collected: " + strconv.Itoa(len(all))
+	if suspiciousCount > 0 {
+		desc += " (" + strconv.Itoa(suspiciousCount) + " suspicious, " + strconv.Itoa(exploitableCount) + " standard exploitable)"
+	}
 
 	// kembalikan satu Finding berisi snapshot autoruns
 	return Finding{

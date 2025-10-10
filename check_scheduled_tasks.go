@@ -47,16 +47,57 @@ func runCheckScheduledTasks() Finding {
 		results, _ = enumerateTasksViaXML()
 	}
 
-	// Tentukan severity ringkas: naikkan ke medium jika ada indikasi resiko
+	// Tentukan severity berdasarkan analisis yang lebih cerdas
 	sev := SevInfo
+	exploitableCount := 0
+	suspiciousCount := 0
+
 	for _, r := range results {
-		if r["unquoted"] == "true" || r["exploitable"] == "true" {
-			sev = SevMed
-			break
+		taskName := strings.ToLower(r["task_name"])
+		exePath := strings.ToLower(strings.ReplaceAll(r["exe_path"], "/", "\\"))
+		command := strings.ToLower(strings.ReplaceAll(r["command"], "/", "\\"))
+
+		// Skip legitimate Windows system tasks and user applications
+		isSystemTask := strings.Contains(taskName, "\\microsoft\\") ||
+			strings.Contains(taskName, "\\windows\\") ||
+			strings.Contains(exePath, "\\windows\\system32\\") ||
+			strings.Contains(exePath, "\\windows\\syswow64\\") ||
+			strings.Contains(exePath, "\\program files\\") ||
+			strings.Contains(exePath, "\\program files (x86)\\") ||
+			command == "com handler" // COM handlers are system tasks
+
+		// User applications in AppData are also considered legitimate
+		isUserApp := strings.Contains(exePath, "\\users\\") &&
+			(strings.Contains(exePath, "\\appdata\\local\\programs\\") ||
+				strings.Contains(exePath, "\\appdata\\roaming\\"))
+
+		isLegitimate := isSystemTask || isUserApp
+
+		if r["exploitable"] == "true" {
+			if !isLegitimate {
+				// Non-legitimate task that's exploitable = suspicious
+				suspiciousCount++
+			} else {
+				// Legitimate task that appears exploitable = likely false positive, just count
+				exploitableCount++
+			}
+		}
+
+		if r["unquoted"] == "true" && !isLegitimate {
+			// Unquoted non-legitimate path = suspicious
+			suspiciousCount++
 		}
 	}
 
+	// Set severity based on suspicious findings, not just any exploitable finding
+	if suspiciousCount > 0 {
+		sev = SevMed
+	}
+
 	desc := "Scheduled tasks collected: " + strconv.Itoa(len(results))
+	if suspiciousCount > 0 {
+		desc += " (" + strconv.Itoa(suspiciousCount) + " suspicious, " + strconv.Itoa(exploitableCount) + " system exploitable)"
+	}
 	return Finding{
 		CheckID:     "W-005",
 		Title:       "Scheduled Tasks Snapshot",
@@ -157,14 +198,34 @@ func analyzeTask(taskName, action string) map[string]string {
 		exploitable = "true"
 	}
 
+	// Determine if this is a legitimate task (system or user app)
+	taskNameLower := strings.ToLower(taskName)
+	exeLower := strings.ToLower(strings.ReplaceAll(exe, "/", "\\"))
+	cmdLower := strings.ToLower(strings.ReplaceAll(cmd, "/", "\\"))
+	isSystemTask := strings.Contains(taskNameLower, "\\microsoft\\") ||
+		strings.Contains(taskNameLower, "\\windows\\") ||
+		strings.Contains(exeLower, "\\windows\\system32\\") ||
+		strings.Contains(exeLower, "\\windows\\syswow64\\") ||
+		strings.Contains(exeLower, "\\program files\\") ||
+		strings.Contains(exeLower, "\\program files (x86)\\") ||
+		cmdLower == "com handler" // COM handlers are system tasks
+
+	// User applications in AppData are also considered legitimate
+	isUserApp := strings.Contains(exeLower, "\\users\\") &&
+		(strings.Contains(exeLower, "\\appdata\\local\\programs\\") ||
+			strings.Contains(exeLower, "\\appdata\\roaming\\"))
+
+	isLegitimate := isSystemTask || isUserApp
+
 	return map[string]string{
-		"task_name":         toDisplayPath(taskName),      // nama task (bisa berawalan '\')
-		"command":           toDisplayPath(cmd),           // string action mentah
-		"exe_path":          toDisplayPath(exe),           // path exe yang dianalisis
-		"unquoted":          unquoted,                     // apakah unquoted
-		"exploitable":       exploitable,                  // ada segmen writable?
-		"writable_segments": strings.Join(writable, "; "), // daftar segmen writable
-		"source":            "schtasks",                   // penanda jalur enumerasi
+		"task_name":         toDisplayPath(taskName),          // nama task (bisa berawalan '\')
+		"command":           toDisplayPath(cmd),               // string action mentah
+		"exe_path":          toDisplayPath(exe),               // path exe yang dianalisis
+		"unquoted":          unquoted,                         // apakah unquoted
+		"exploitable":       exploitable,                      // ada segmen writable?
+		"is_system_task":    strconv.FormatBool(isLegitimate), // legitimate task (system or user app)?
+		"writable_segments": strings.Join(writable, "; "),     // daftar segmen writable
+		"source":            "schtasks",                       // penanda jalur enumerasi
 	}
 }
 
@@ -173,7 +234,15 @@ func analyzeTask(taskName, action string) map[string]string {
    --------------------------------------------------------- */
 
 func enumerateTasksViaXML() ([]map[string]string, error) {
-	const tasksRoot = `C:\Windows\System32\Tasks`
+	// Use WINDIR environment variable instead of hardcoded C:\Windows
+	winDir := os.Getenv("WINDIR")
+	if winDir == "" {
+		winDir = os.Getenv("SystemRoot")
+		if winDir == "" {
+			winDir = `C:\Windows` // fallback only
+		}
+	}
+	tasksRoot := filepath.Join(winDir, "System32", "Tasks")
 
 	results := make([]map[string]string, 0, 64)
 
@@ -218,12 +287,32 @@ func enumerateTasksViaXML() ([]map[string]string, error) {
 			exploitable = "true"
 		}
 
+		// Determine if this is a legitimate task (system or user app)
+		taskNameLower := strings.ToLower(path)
+		exeLower := strings.ToLower(strings.ReplaceAll(exe, "/", "\\"))
+		cmdLower := strings.ToLower(strings.ReplaceAll(cmd+" "+args, "/", "\\"))
+		isSystemTask := strings.Contains(taskNameLower, "\\microsoft\\") ||
+			strings.Contains(taskNameLower, "\\windows\\") ||
+			strings.Contains(exeLower, "\\windows\\system32\\") ||
+			strings.Contains(exeLower, "\\windows\\syswow64\\") ||
+			strings.Contains(exeLower, "\\program files\\") ||
+			strings.Contains(exeLower, "\\program files (x86)\\") ||
+			cmdLower == "com handler" // COM handlers are system tasks
+
+		// User applications in AppData are also considered legitimate
+		isUserApp := strings.Contains(exeLower, "\\users\\") &&
+			(strings.Contains(exeLower, "\\appdata\\local\\programs\\") ||
+				strings.Contains(exeLower, "\\appdata\\roaming\\"))
+
+		isLegitimate := isSystemTask || isUserApp
+
 		results = append(results, map[string]string{
 			"task_file":         toDisplayPath(path),
 			"command":           toDisplayPath(cmd + " " + args),
 			"exe_path":          toDisplayPath(exe),
 			"unquoted":          unquoted,
 			"exploitable":       exploitable,
+			"is_system_task":    strconv.FormatBool(isLegitimate),
 			"writable_segments": strings.Join(writable, "; "),
 			"source":            "xml",
 		})
