@@ -42,7 +42,7 @@ A comprehensive Windows OS security assessment tool for defensive security and v
 
 ## 🔍 Overview
 
-**OSAgent** is a defensive security assessment tool designed to perform comprehensive vulnerability assessments on Windows operating systems. It analyzes system configurations, identifies security misconfigurations, detects potential privilege escalation vectors, and provides actionable security intelligence.
+**NGESCAN** is a defensive security assessment tool designed to perform comprehensive vulnerability assessments on Windows operating systems. It analyzes system configurations, identifies security misconfigurations, detects potential privilege escalation vectors, and provides actionable security intelligence.
 
 ### **Purpose**
 
