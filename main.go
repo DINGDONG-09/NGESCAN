@@ -6,25 +6,24 @@ package main
 import (
 	"bufio" // untuk interactive shell
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec" // jalankan ulang exe sendiri dengan argumen user
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"golang.org/x/sync/errgroup"
+	"corp/OSagent/core"
 )
 
-// type alias biar ringkas
-type checkFn = func() Finding
+const (
+	VERSION   = "1.0.0"
+	TOOL_NAME = "OSAgent"
+)
 
 func main() {
 	// ===== [Mode interaktif] =====
-	// Jika double-click (tidak ada argumen), buka interactive shell.
 	if len(os.Args) == 1 {
 		startInteractiveShell()
 		return
@@ -33,138 +32,152 @@ func main() {
 	// ===== Flags =====
 	shellFlag := flag.Bool("shell", false, "start interactive shell (banner + prompt)")
 	pretty := flag.Bool("pretty", false, "Pretty-print JSON output")
-	timeout := flag.Int("timeout", 45, "Global timeout in seconds")
+	timeout := flag.Int("timeout", 60, "Global timeout in seconds")
 	checksFlag := flag.String("checks", "", "Comma-separated check IDs to run (e.g. W-001,W-003). Empty = all.")
-	outputFile := flag.String("output", "", "Output results to JSON file (e.g. -output results.json)")
+	outputFile := flag.String("output", "", "Output results to JSON file")
+	summary := flag.Bool("summary", false, "Show summary table (always shown when writing to file)")
+	verbose := flag.Bool("verbose", false, "Show detailed progress")
 	flag.Parse()
 
-	// Jika user minta shell lewat flag
 	if *shellFlag {
 		startInteractiveShell()
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "OSAgent (defensive) - running checks...")
-
-	// ===== Registry cek (ID -> fungsi) =====
-	reg := map[string]checkFn{
-		"W-001": runCheckAlwaysInstallElevated,
-		"W-002": runCheckUnquotedServicePaths,
-		"W-003": runCheckUACSnapshot,
-		"W-004": runCheckAutoruns,
-		"W-005": runCheckScheduledTasks,
-		"W-006": runCheckHotfix,
-		"W-007": runCheckUsersGroups,
-		"W-008": runCheckTokenPrivileges,
-		"W-009": runCheckNetworkSnapshot,
-		"W-010": runCheckListeningPorts,
-		"W-011": runCheckSystemInfo,
-		"W-012": runCheckRdpFirewallProxy,
-		"W-013": runCheckPathWritable,
-		"W-014": runCheckServiceHijack,
-		"W-015": runCheckDefenderExclusions,
-		"W-016": runCheckLSA,
-		"W-017": runCheckIFEO,
-		"W-018": runCheckServiceBinaryACL,
-		"W-019": runCheckPowerShellHistory,
-		"W-020": runCheckLSASSArtifacts,
+	// ===== Setup Scanner =====
+	cfg := core.Config{
+		Timeout:        time.Duration(*timeout) * time.Second,
+		ParallelChecks: true,
+		MaxWorkers:     5,
+		Verbose:        *verbose,
 	}
 
-	// ===== Pilih cek yang akan dijalankan =====
-	var selected []string
-	if strings.TrimSpace(*checksFlag) == "" {
-		// tidak ada filter -> semua
-		selected = []string{"W-001", "W-002", "W-003", "W-004", "W-005", "W-006", "W-007", "W-008", "W-009", "W-010", "W-011", "W-012", "W-013", "W-014", "W-015", "W-016", "W-017", "W-018", "W-019", "W-020"}
-	} else {
-		// parse CSV, normalisasi & validasi ID
+	scanner := core.NewScanner(cfg)
+
+	// ===== Register all checks =====
+	registerAllChecks(scanner)
+
+	// ===== Parse filter IDs =====
+	var filterIDs []string
+	if strings.TrimSpace(*checksFlag) != "" {
 		for _, raw := range strings.Split(*checksFlag, ",") {
 			id := strings.ToUpper(strings.TrimSpace(raw))
-			if _, ok := reg[id]; ok {
-				selected = append(selected, id)
+			if id != "" {
+				filterIDs = append(filterIDs, id)
 			}
 		}
-		// kalau semua ID invalid, fallback ke semua
-		if len(selected) == 0 {
-			selected = []string{"W-001", "W-002", "W-003", "W-004", "W-005", "W-006", "W-007", "W-008", "W-009", "W-010", "W-011", "W-012", "W-013", "W-014", "W-015", "W-016", "W-017", "W-018", "W-019", "W-020"}
-		}
 	}
 
-	// ===== Jalankan paralel dengan timeout global =====
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout)*time.Second)
-	defer cancel()
+	// ===== Run scan =====
+	fmt.Fprintln(os.Stderr, core.Colorize("Starting Windows OS Security Scan...", core.ColorCyan))
+	if len(filterIDs) > 0 {
+		fmt.Fprintf(os.Stderr, "Filter: %v\n", filterIDs)
+	}
+	fmt.Fprintln(os.Stderr, "")
 
-	resultsCh := make(chan Finding, len(selected))
-	eg, _ := errgroup.WithContext(ctx)
+	startTime := time.Now()
+	results := scanner.Run(context.Background(), filterIDs)
+	duration := time.Since(startTime)
 
-	for _, id := range selected {
-		id := id
-		fn := reg[id]
-		eg.Go(func() error {
-			resultsCh <- fn()
-			return nil
-		})
+	// ===== Generate Report =====
+	metadata := core.Metadata{
+		Tool:     TOOL_NAME,
+		Version:  VERSION,
+		ScanTime: startTime,
+		Duration: duration.Round(time.Second).String(),
+		Hostname: getHostname(),
+		Username: getUsername(),
+		OS:       "Windows",
+		IsAdmin:  isAdmin(),
 	}
 
-	_ = eg.Wait()
-	close(resultsCh)
+	report := core.GenerateReport(results, metadata)
 
-	// kumpulkan hasil
-	out := make([]Finding, 0, len(selected))
-	for f := range resultsCh {
-		out = append(out, f)
-	}
-
-	// ===== Sort results by CheckID =====
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CheckID < out[j].CheckID
-	})
-
-	// ===== Emit output =====
+	// ===== Output =====
 	var outputWriter *os.File
 	var shouldCloseFile bool
+	showSummaryTable := *summary
 
-	// Determine output destination
 	if *outputFile != "" {
-		// Write to file
 		file, err := os.Create(*outputFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to create output file '%s': %v\n", *outputFile, err)
+			fmt.Fprintf(os.Stderr, "Error creating file '%s': %v\n", *outputFile, err)
 			os.Exit(1)
 		}
 		outputWriter = file
 		shouldCloseFile = true
-		fmt.Fprintf(os.Stderr, "Writing results to file: %s\n", *outputFile)
+		showSummaryTable = true // Always show summary when saving to file
+
+		fmt.Fprintf(os.Stderr, core.Colorize("✓ Saving results to: %s\n", core.ColorGreen), *outputFile)
 	} else {
-		// Write to stdout
 		outputWriter = os.Stdout
 		shouldCloseFile = false
 	}
 
-	// Ensure file is closed if we opened it
 	if shouldCloseFile {
 		defer func() {
 			if err := outputWriter.Close(); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to close output file: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error closing file: %v\n", err)
 			}
 		}()
 	}
 
-	enc := json.NewEncoder(outputWriter)
-	enc.SetEscapeHTML(false) // biar & tidak jadi \u0026
-
-	if *pretty {
-		enc.SetIndent("", "  ")
-	}
-
-	if err := enc.Encode(out); err != nil {
-		fmt.Fprintln(os.Stderr, "failed to emit findings:", err)
+	// Write JSON
+	if err := core.WriteJSON(outputWriter, report, *pretty); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Print completion message if writing to file
-	if *outputFile != "" {
-		fmt.Fprintf(os.Stderr, "Results successfully written to: %s\n", *outputFile)
+	// Print summary to stderr (so it doesn't mix with JSON stdout)
+	if showSummaryTable {
+		core.PrintSummaryTable(report, os.Stderr)
 	}
+
+	// Exit code based on findings
+	if report.Summary.Vulnerable > 0 {
+		os.Exit(1) // Found vulnerabilities
+	}
+}
+
+// registerAllChecks mendaftarkan semua pemeriksaan
+func registerAllChecks(s *core.Scanner) {
+	checks := []core.Check{
+		NewCheckAlwaysInstallElevated(),
+		NewCheckUnquotedServicePaths(),
+		NewCheckUACSnapshot(),
+		NewCheckAutoruns(),
+		NewCheckScheduledTasks(),
+		NewCheckHotfix(),
+		NewCheckUsersGroups(),
+		NewCheckTokenPrivileges(),
+		NewCheckNetworkSnapshot(),
+		NewCheckListeningPorts(),
+		NewCheckSystemInfo(),
+		NewCheckRdpFirewallProxy(),
+		NewCheckPathWritable(),
+		NewCheckServiceHijack(),
+		NewCheckDefenderExclusions(),
+		NewCheckLSA(),
+		NewCheckIFEO(),
+		NewCheckServiceBinaryACL(),
+		NewCheckPowerShellHistory(),
+		NewCheckLSASSArtifacts(),
+	}
+
+	for _, check := range checks {
+		s.RegisterCheck(check)
+	}
+}
+
+/* ======================= Helper functions ======================= */
+
+func getHostname() string {
+	hostname, _ := os.Hostname()
+	return hostname
+}
+
+func getUsername() string {
+	return os.Getenv("USERNAME")
 }
 
 /* ======================= Interactive shell helpers ======================= */
@@ -178,11 +191,10 @@ func startInteractiveShell() {
 	exe = filepath.Clean(exe)
 	rd := bufio.NewScanner(os.Stdin)
 
-	fmt.Println("Type commands below (same as CLI flags). Examples:")
-	fmt.Println("  -checks W-016 -pretty")
-	fmt.Println("  -checks W-015,W-017")
-	fmt.Println("  -output scan_results.json")
-	fmt.Println("  -checks W-001,W-020 -pretty -output full_scan.json")
+	fmt.Println("Type commands below. Examples:")
+	fmt.Println("  -checks W-016 -pretty -summary")
+	fmt.Println("  -checks W-015,W-017 -output results.json")
+	fmt.Println("  -summary  (run all with summary)")
 	fmt.Println("Built-ins: help, exit, quit")
 	fmt.Println()
 
@@ -236,37 +248,39 @@ func startInteractiveShell() {
 // printBanner menampilkan ASCII logo sederhana (bebas kamu ganti)
 func printBanner() {
 	const banner = `
-        _   ________  ______   _____    ______   ___       _   __
-   / | / /  / ____/  / ____/  / ___/   / ____/  /   |     / | / /
-  /  |/ /  / / __   / __/     \__ \   / /      / /| |    /  |/ / 
- / /|  /  / /_/ /  / /___    ___/ /  / /___   / ___ |   / /|  /  
-/_/ |_/   \____/  /_____/   /____/   \____/  /_/  |_|  /_/ |_/   
-                                                                 
-                                                                                                       
-                                                                                          
+   ____  _____   ___                    __  
+  / __ \/ ___/  /   | ____ ____  ____  / /_ 
+ / / / /\__ \  / /| |/ __  / _ \/ __ \/ __/ 
+/ /_/ /___/ / / ___ / /_/ /  __/ / / / /_   
+\____//____/ /_/  |_\__, /\___/_/ /_/\__/   
+                   /____/                    
 
 `
 
 	fmt.Print(banner)
 	fmt.Println(strings.Repeat("*", 70))
-	fmt.Println("  OSSCANNER (defensive)                    Windows OS scanner")
+	fmt.Printf("  Windows OS Security Scanner v%s\n", VERSION)
+	fmt.Println("  Defensive Security Assessment Tool")
 	fmt.Println(strings.Repeat("*", 70))
 }
 
 // printHelp menjelaskan cara pakai dari dalam shell
 func printHelp() {
 	fmt.Println("Usage inside shell:")
-	fmt.Println("  -checks W-001,W-015 -pretty")
-	fmt.Println("  -checks W-016")
-	fmt.Println("  -pretty")
-	fmt.Println("  -output results.json")
-	fmt.Println("  -checks W-001,W-020 -pretty -output scan_results.json")
-	fmt.Println("Built-ins: help, exit, quit")
+	fmt.Println("  -checks W-001,W-015 -pretty -summary")
+	fmt.Println("  -checks W-016 -output scan.json")
+	fmt.Println("  -summary (run all checks with summary)")
+	fmt.Println("  -verbose (show detailed progress)")
 	fmt.Println("")
-	fmt.Println("Output options:")
-	fmt.Println("  -output [filename.json]  Save results to JSON file (sorted W-001 to W-020)")
-	fmt.Println("  -pretty                  Format JSON with indentation")
-	fmt.Println("  (no flags)               Display compact JSON to terminal")
+	fmt.Println("Options:")
+	fmt.Println("  -checks [IDs]     Comma-separated check IDs (W-001 to W-020)")
+	fmt.Println("  -output [file]    Save results to JSON file")
+	fmt.Println("  -pretty           Format JSON with indentation")
+	fmt.Println("  -summary          Show summary table after scan")
+	fmt.Println("  -verbose          Show detailed progress information")
+	fmt.Println("  -timeout [secs]   Set timeout (default: 60)")
+	fmt.Println("")
+	fmt.Println("Built-ins: help, exit, quit")
 }
 
 // splitCommandLine memecah input menjadi argumen (mendukung kutip "…").
